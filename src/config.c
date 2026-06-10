@@ -692,6 +692,8 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
       if (g_config.extended_aspect_ratio && !novis)
         g_config.features0 |= kFeatures0_WidescreenVisualFixes;
       return true;
+    } else if (StringEqualsNoCase(key, "FillExtendedAspectRatioBorders")) {
+      return ParseBool(value, &g_config.fill_extended_aspect_ratio_borders);
     } else if (StringEqualsNoCase(key, "DisplayPerfInTitle")) {
       return ParseBool(value, &g_config.display_perf_title);
     } else if (StringEqualsNoCase(key, "DisableFrameDelay")) {

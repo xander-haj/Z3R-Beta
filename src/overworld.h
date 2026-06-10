@@ -360,7 +360,7 @@ void LoadOverworldOverlay();
 void Map16ToMap8(const uint8 *src, int r20);
 // Copies Map16 tile data into the working buffer for tilemap construction
 void OverworldCopyMap16ToBuffer(const uint8 *src, uint16 r20, int r14, uint16 *r10);
-// Restores tiles that were temporarily changed by a mirror bonk
+// Replays live map16 changes after redraws, including mirror bonks
 void MirrorBonk_RecoverChangedTiles();
 // Decompresses the enemy damage subclass table from ROM bank 02
 void DecompressEnemyDamageSubclasses();

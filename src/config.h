@@ -109,6 +109,7 @@ typedef struct Config {
   bool autosave;                   // Auto-save SRAM on exit
   uint8 extended_aspect_ratio;     // Extra horizontal pixels per side for widescreen
   bool extend_y;                   // Extend vertical resolution from 224 to 240
+  bool fill_extended_aspect_ratio_borders; // Fill outdoor/dungeon widescreen side padding from edge art
   bool no_sprite_limits;           // Remove the SNES 32-sprite-per-scanline limit
   bool display_perf_title;         // Show FPS/performance stats in window title
   int16 hud_magic_frame_pos_x;     // Widescreen HUD magic-frame X tile

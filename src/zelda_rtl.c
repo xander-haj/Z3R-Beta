@@ -166,7 +166,7 @@ static const uint8 transferLength[8] = {
 static bool Zelda_ShouldRenderWideHudOverlay() {
   if (overworld_map_state == 0 &&
       (main_module_index == 7 || main_module_index == 8 || main_module_index == 9 ||
-       main_module_index == 11 || main_module_index == 15))
+       main_module_index == 11 || main_module_index == 15 || main_module_index == 17))
     return true;
 
   if (main_module_index != 14)
@@ -187,7 +187,8 @@ static bool Zelda_ShouldRenderWideHudOverlay() {
 // Gameplay and transition modules keep the vanilla BG3 HUD visible, so BG3
 // needs the same viewport anchor when ExtendedAspectRatio side-space is active.
 static bool Zelda_IsGameplayModuleForBg3Anchor(uint8 module) {
-  return module == 7 || module == 8 || module == 9 || module == 11 || module == 15;
+  return module == 7 || module == 8 || module == 9 || module == 11 || module == 15 ||
+         module == 17;
 }
 
 static bool Zelda_ShouldAnchorBg3ToViewport() {
@@ -427,7 +428,8 @@ static void SimpleHdma_DoLine(SimpleHdma *c) {
  *     the lantern's circle anyway.
  *   - Transition modules that temporarily wrap indoor/overworld gameplay
  *     are treated as whichever world they are currently presenting, so
- *     house exits do not briefly collapse back to the 4:3 side padding.
+ *     house exits and falling entrances do not briefly collapse back to
+ *     the 4:3 side padding.
  *   - Indoor transition submodules keep the old side-space only until
  *     the destination room has loaded enough geometry to report its own
  *     bounds, avoiding a visible resize when control returns.
@@ -444,10 +446,19 @@ static void ConfigurePpuSideSpace() {
   int mod = main_module_index;
   if (mod == 14)
     mod = saved_module_for_menu;
-  if (mod == 15 || mod == 16)
+  if (mod == 15 || mod == 16 || mod == 17)
     mod = player_is_indoors ? 7 : 9;
   else if (mod == 8 || mod == 10 || mod == 11)
     mod = 9;
+  bool is_master_sword_grove = BYTE(overworld_screen_index) == 0x80 && dungeon_room_index == 0x180;
+  PpuWidescreenBorderFillMode border_fill_mode = kPpuWidescreenBorderFill_None;
+  if (g_config.fill_extended_aspect_ratio_borders && g_config.extended_aspect_ratio != 0) {
+    if (mod == 9)
+      border_fill_mode = is_master_sword_grove ?
+          kPpuWidescreenBorderFill_GroveTileColumns : kPpuWidescreenBorderFill_TwoTileRepeat;
+    else if (mod == 7 && dungeon_room_index < 0x100)
+      border_fill_mode = kPpuWidescreenBorderFill_TwoTileRepeat;
+  }
   if (mod == 9) {
     if (main_module_index == 14 && submodule_index == 7 && overworld_map_state >= 4) {
       // World map
@@ -469,12 +480,14 @@ static void ConfigurePpuSideSpace() {
     bool seamless_transition =
         (enhanced_features0 & (kFeatures0_ExtendScreen64 | kFeatures0_WidescreenVisualFixes)) &&
         (submodule_index == 1 || submodule_index == 2 || submodule_index == 6 ||
-         submodule_index == 14 || (submodule_index >= 17 && submodule_index <= 19));
+         submodule_index == 7 || submodule_index == 14 ||
+         (submodule_index >= 17 && submodule_index <= 19));
     bool hold_previous_side_space =
         seamless_transition &&
         (submodule_index == 1 ? true :
          submodule_index == 2 ? subsubmodule_index < 4 :
          submodule_index == 6 ? subsubmodule_index < 7 :
+         submodule_index == 7 ? main_module_index != 17 && subsubmodule_index < 3 :
          submodule_index == 14 ? subsubmodule_index < 7 :
          submodule_index >= 17 && submodule_index <= 19 ? subsubmodule_index < 3 :
          false);
@@ -508,7 +521,7 @@ static void ConfigurePpuSideSpace() {
     extra_left = target_extra, extra_right = target_extra;
     extra_bottom = 16;
   }
-  PpuSetExtraSideSpace(g_zenv.ppu, extra_left, extra_right, extra_bottom);
+  PpuSetExtraSideSpace(g_zenv.ppu, extra_left, extra_right, extra_bottom, border_fill_mode);
 }
 
 /*

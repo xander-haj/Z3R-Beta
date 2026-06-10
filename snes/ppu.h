@@ -31,6 +31,12 @@ typedef struct Ppu Ppu;
 
 #include "src/types.h"
 
+typedef enum PpuWidescreenBorderFillMode {
+  kPpuWidescreenBorderFill_None = 0,
+  kPpuWidescreenBorderFill_TwoTileRepeat = 1,
+  kPpuWidescreenBorderFill_GroveTileColumns = 2,
+} PpuWidescreenBorderFillMode;
+
 /*
  * BgLayer — Per-background-layer configuration for one of the SNES's
  * four hardware background planes (BG1..BG4). The number of usable layers
@@ -167,6 +173,7 @@ struct Ppu {
   uint8_t lastBrightnessMult; // Cached brightness LUT version (rebuild on brightness change)
   uint8_t lastMosaicModulo;   // Cached mosaic LUT version (rebuild on mosaic size change)
   uint8_t renderFlags;     // Active render feature flags (see kPpuRenderFlags_*)
+  uint8_t widescreenBorderFillMode; // PpuWidescreenBorderFillMode for unused side padding
   bool renderWideHud;      // Draw BG3 HUD over the full widescreen viewport
   bool anchorWideHudBg3;   // Apply BG3 HUD anchoring only while the legacy gameplay strip is active
   const uint16_t *wideHudTilemap; // 64-column widescreen HUD tilemap supplied by the game layer
@@ -287,7 +294,7 @@ int PpuGetCurrentRenderScale(Ppu *ppu, uint32_t render_flags);
 // `low` and `high` define the scanline range over which correction ramps.
 void PpuSetMode7PerspectiveCorrection(Ppu *ppu, int low, int high);
 // Configure extra pixels rendered beyond the standard 256×224 area.
-void PpuSetExtraSideSpace(Ppu *ppu, int left, int right, int bottom);
+void PpuSetExtraSideSpace(Ppu *ppu, int left, int right, int bottom, PpuWidescreenBorderFillMode fill_mode);
 void PpuSetRenderWideHud(Ppu *ppu, bool enabled, bool anchor_bg3, const uint16_t *tilemap, uint8_t shadow_size);
 
 #endif  // ZELDA3_SNES_PPU_H_

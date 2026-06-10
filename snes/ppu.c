@@ -109,6 +109,7 @@
 #include <assert.h>
 #include "ppu.h"
 #include "src/types.h"
+#include "ppu_grove_border_tiles.h"
 
 /*
  * kSpriteSizes — the eight {small, large} sprite-size pairs the SNES PPU
@@ -138,6 +139,7 @@ static int ppu_getPixelForMode7(Ppu* ppu, int x, int layer, bool priority); // M
 static bool ppu_getWindowState(Ppu* ppu, int layer, int x); // Test if pixel is inside window region
 static bool ppu_evaluateSprites(Ppu* ppu, int line);        // Build sprite buffer for scanline
 static void PpuDrawWholeLine(Ppu *ppu, uint y);             // Whole-line renderer (new path)
+static void PpuFillMissingWidescreenBorders(Ppu *ppu, uint32 *dst, uint y); // Extend local edge content into padding
 
 /*
  * Layer/window quick-test macros. The SNES exposes per-layer enable bits
@@ -216,6 +218,7 @@ void ppu_reset(Ppu* ppu) {
   ppu->extraLeftCur = 0;
   ppu->extraRightCur = 0;
   ppu->extraBottomCur = 0;
+  ppu->widescreenBorderFillMode = kPpuWidescreenBorderFill_None;
   ppu->viewportLeftCur = 0;
   ppu->vramPointer = 0;
   ppu->vramIncrementOnHigh = false;
@@ -493,6 +496,7 @@ void ppu_runLine(Ppu *ppu, int line) {
         memset(dst, 0, sizeof(uint32) * ppu->extraLeftRight);
         memset(dst + sizeof(uint32) * (256 + ppu->extraLeftRight), 0, sizeof(uint32) * ppu->extraLeftRight);
       }
+      PpuFillMissingWidescreenBorders(ppu, (uint32*)dst, line);
       PpuDrawWideHudOverlay(ppu, line, (uint32*)dst);
     }
   }
@@ -1267,18 +1271,72 @@ void PpuSetMode7PerspectiveCorrection(Ppu *ppu, int low, int high) {
  *
  * `left` and `right` are clamped to extraLeftRight (the compile-time
  * maximum, 96 when widescreen is enabled). `bottom` is clamped to 16
- * (the maximum extra rows below the standard 224). The renderer
- * consults extraLeftCur/extraRightCur/extraBottomCur to expand the
- * rendered region.
+ * (the maximum extra rows below the standard 224). `fill_mode`
+ * lets configured screens synthesize unused side padding from local edge art.
+ * The renderer consults extraLeftCur/extraRightCur/extraBottomCur to
+ * expand the rendered region.
  */
-void PpuSetExtraSideSpace(Ppu *ppu, int left, int right, int bottom) {
+void PpuSetExtraSideSpace(Ppu *ppu, int left, int right, int bottom, PpuWidescreenBorderFillMode fill_mode) {
   ppu->extraLeftCur = UintMin(left, ppu->extraLeftRight);
   ppu->extraRightCur = UintMin(right, ppu->extraLeftRight);
   ppu->extraBottomCur = UintMin(bottom, 16);
+  if (ppu->widescreenBorderFillMode == kPpuWidescreenBorderFill_GroveTileColumns &&
+      fill_mode != kPpuWidescreenBorderFill_GroveTileColumns)
+    PpuResetGroveTileColumnWidescreenBorders();
+  ppu->widescreenBorderFillMode = fill_mode;
   int target_extra = ppu->extraLeftRight >> 1;
   int wanted_total = target_extra * 2;
   ppu->viewportLeftCur = (ppu->extraLeftCur + ppu->extraRightCur >= wanted_total) ?
       ppu->extraLeftRight - ppu->extraLeftCur : ppu->extraLeftRight - target_extra;
+}
+
+static void PpuFillRepeatedEdgeStripWidescreenBorders(uint32 *dst, int full_width, int missing_left,
+                                                      int missing_right, int drawn_left,
+                                                      int drawn_right, int repeat_width) {
+  int source_width = IntMin(repeat_width, drawn_right - drawn_left);
+  if (missing_left > 0) {
+    for (int x = 0; x < missing_left; x++) {
+      int source_offset = (x - missing_left) % source_width;
+      if (source_offset < 0)
+        source_offset += source_width;
+      dst[x] = dst[drawn_left + source_offset];
+    }
+  }
+
+  if (missing_right > 0) {
+    int source_left = drawn_right - source_width;
+    for (int x = drawn_right; x < full_width; x++)
+      dst[x] = dst[source_left + (x - drawn_right) % source_width];
+  }
+}
+
+/*
+ * Fill widescreen side columns after the normal scene render.
+ * Structured rooms fill only missing padding with a 16-pixel edge repeat. The
+ * Master Sword grove overwrites its complete side-border bands from editable
+ * tile tables so authored columns are never mixed with temporary edge capture.
+ * This runs before the software HUD overlay so HUD pixels can still appear on top.
+ */
+static void PpuFillMissingWidescreenBorders(Ppu *ppu, uint32 *dst, uint y) {
+  if (ppu->widescreenBorderFillMode == kPpuWidescreenBorderFill_None ||
+      ppu->extraLeftRight == 0)
+    return;
+
+  int full_width = 256 + ppu->extraLeftRight * 2;
+  int missing_left = ppu->extraLeftRight - ppu->extraLeftCur;
+  int missing_right = ppu->extraLeftRight - ppu->extraRightCur;
+  int drawn_left = missing_left;
+  int drawn_right = full_width - missing_right;
+  if (drawn_right <= drawn_left)
+    return;
+
+  if (ppu->widescreenBorderFillMode == kPpuWidescreenBorderFill_GroveTileColumns) {
+    PpuFillGroveTileColumnWidescreenBorders(ppu, dst, full_width, missing_left, missing_right, y);
+    return;
+  }
+
+  PpuFillRepeatedEdgeStripWidescreenBorders(
+      dst, full_width, missing_left, missing_right, drawn_left, drawn_right, 16);
 }
 
 void PpuSetRenderWideHud(Ppu *ppu, bool enabled, bool anchor_bg3, const uint16_t *tilemap, uint8_t shadow_size) {
@@ -1689,6 +1747,7 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
   if (ppu->extraLeftRight - ppu->extraRightCur != 0)
     memset(dst_org + (256 + ppu->extraLeftRight * 2 - (ppu->extraLeftRight - ppu->extraRightCur)), 0,
         sizeof(uint32) * (ppu->extraLeftRight - ppu->extraRightCur));
+  PpuFillMissingWidescreenBorders(ppu, dst_org, y);
   PpuDrawWideHudOverlay(ppu, y, dst_org);
 }
 

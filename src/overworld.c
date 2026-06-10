@@ -1215,11 +1215,13 @@ static bool Overworld_GetWidescreenSideSpace(int *extra_left_out, int *extra_rig
   if (extra_right_out)
     *extra_right_out = 0;
   if (!(enhanced_features0 & (kFeatures0_ExtendScreen64 | kFeatures0_WidescreenVisualFixes)) ||
-      g_config.extended_aspect_ratio == 0 ||
-      kOverworldMapIsSmall[BYTE(overworld_screen_index)])
+      g_config.extended_aspect_ratio == 0)
     return false;
 
   int target_extra = g_config.extended_aspect_ratio;
+  if (kOverworldMapIsSmall[BYTE(overworld_screen_index)])
+    return false;
+
   int avail_left = IntMax(BG2HOFS_copy2 - ow_scroll_vars0.xstart, 0);
   int avail_right = IntMax(ow_scroll_vars0.xend - BG2HOFS_copy2, 0);
   int wanted_total = target_extra * 2;
@@ -1244,8 +1246,6 @@ static void Overworld_SetMap16LoadOffsetToWideCamera() {
     map16_load_src_off = 0x390;
   } else {
     uint16 x_origin = BG2HOFS_copy2 - Overworld_GetWidescreenExtraLeft();
-    /* Special overworld rooms replace the normal area-base tables with
-     * kSpExit_* values, so the wide renderer must follow the live bases. */
     uint16 y = (BG2VOFS_copy2 - overworld_offset_base_y) & overworld_offset_mask_y;
     uint16 x = ((x_origin >> 3) - overworld_offset_base_x) & overworld_offset_mask_x;
     map16_load_src_off = ((y << 3) + x + 0x390) & 0x1fff;
@@ -1479,8 +1479,11 @@ static void Overworld_BuildWideScreenTilemap(bool redraw_screen) {
   uint16 bak2 = map16_load_dst_off;
   uint16 bak3 = map16_load_var2;
 
-  if (redraw_screen)
+  if (redraw_screen) {
     Overworld_DrawQuadrantsAndOverlays();
+    /* Preserve live door/cutscene tile changes across the wide redraw. */
+    MirrorBonk_RecoverChangedTiles();
+  }
   Overworld_SetMap16LoadOffsetToWideCamera();
   Map16ToMap8(&g_ram[0x2000], 0);
 
@@ -3828,9 +3831,9 @@ void OverworldCopyMap16ToBuffer(const uint8 *src, uint16 r20, int r14, uint16 *r
 
 /*
  * MirrorBonk_RecoverChangedTiles — Replays every memorized tile
- * change after a "mirror bonk" (a failed mirror warp that stays in
- * the same world). Walks memorized_tile_addr/value and re-applies
- * each change so the tile state survives the jolt.
+ * change after a redraw. Originally used for a failed mirror warp
+ * that stays in the same world; also keeps live door/cutscene map16
+ * edits alive when a widescreen tilemap rebuild redraws the area.
  */
 void MirrorBonk_RecoverChangedTiles() {  // 82fe47
   for (int i = 0, i_end = num_memorized_tiles >> 1; i != i_end; i++) {
