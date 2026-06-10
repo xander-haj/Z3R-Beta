@@ -4,8 +4,13 @@ on:
   push:
     branches:
     - master
+    tags:
+    - '*'
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build-unix:
@@ -17,8 +22,10 @@ jobs:
         include:
         - name: Linux
           os: ubuntu-latest
+          artifact-name: z3r-linux
         - name: Mac
           os: macos-latest
+          artifact-name: z3r-macos
     steps:
     - uses: actions/checkout@v3
     - uses: actions/setup-python@v4
@@ -32,6 +39,56 @@ jobs:
     - name: Install dependencies for Mac
       if: ${{ matrix.name == 'Mac' }}
       run: |
-        brew install sdl2 coreutils
+        brew install sdl2
+    - name: Determine build parallelism
+      shell: bash
+      run: |
+        if command -v nproc >/dev/null 2>&1; then
+          echo "MAKE_JOBS=$(nproc)" >> "$GITHUB_ENV"
+        else
+          echo "MAKE_JOBS=$(sysctl -n hw.logicalcpu)" >> "$GITHUB_ENV"
+        fi
     - name: Build
-      run: make -j$(nproc) zelda3
+      run: make -j"$MAKE_JOBS" zelda3
+    - name: Package release artifact
+      if: ${{ startsWith(github.ref, 'refs/tags/') }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        tag_name="${GITHUB_REF_NAME//\//-}"
+        package_dir="${{ matrix.artifact-name }}-${tag_name}"
+        mkdir -p "$package_dir"
+        cp zelda3 zelda3.ini README.md LICENSE.txt "$package_dir/"
+        tar -czf "${package_dir}.tar.gz" "$package_dir"
+    - name: Upload release artifact
+      if: ${{ startsWith(github.ref, 'refs/tags/') }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.artifact-name }}
+        path: ${{ matrix.artifact-name }}-*.tar.gz
+        if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build-unix
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        pattern: z3r-*
+        path: release-artifacts
+        merge-multiple: true
+    - name: Publish GitHub release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TAG_NAME: ${{ github.ref_name }}
+      run: |
+        set -euo pipefail
+        if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+          gh release upload "$TAG_NAME" release-artifacts/* --clobber
+        else
+          gh release create "$TAG_NAME" release-artifacts/* --title "$TAG_NAME" --generate-notes
+        fi
