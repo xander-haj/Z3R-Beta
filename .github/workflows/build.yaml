@@ -1,179 +1,202 @@
-name: Release
+name: Build
 
 on:
   push:
     tags:
-      - 'v*'
+    - 'v*'
   workflow_dispatch:
 
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
-  build-linux:
-    name: Build Linux
-    runs-on: ubuntu-latest
+  build-unix:
+    name: on ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - name: Linux
+          platform: linux
+          os: ubuntu-latest
+          archive: Z3R-linux-x64.tar.gz
+        - name: Mac Intel
+          platform: macos
+          os: macos-15-intel
+          archive: Z3R-macos-intel.tar.gz
+        - name: Mac Apple Silicon
+          platform: macos
+          os: macos-15
+          archive: Z3R-macos-apple-silicon.tar.gz
     steps:
-      - uses: actions/checkout@v6
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsdl2-dev zip wget
-      - name: Build
-        env:
-          CFLAGS: "-O2"
-        run: make -j$(nproc) zelda3
-      - name: Package
-        run: |
-          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps dist
-          cp zelda3 AppDir/usr/bin/
+    - uses: actions/checkout@v6
+    - name: Install dependencies for Linux
+      if: ${{ matrix.platform == 'linux' }}
+      run: |
+        sudo apt update
+        sudo apt install -y libsdl2-dev
+    - name: Install dependencies for Mac
+      if: ${{ matrix.platform == 'macos' }}
+      run: |
+        brew install sdl2
+    - name: Build
+      run: make -j$(getconf _NPROCESSORS_ONLN) zelda3
+    - name: Package ${{ matrix.name }} build
+      run: |
+        mkdir -p "dist/Z3R-${{ matrix.name }}"
+        cp zelda3 zelda3.ini README.md LICENSE.txt "dist/Z3R-${{ matrix.name }}/"
+        tar -czf "dist/${{ matrix.archive }}" -C "dist/Z3R-${{ matrix.name }}" .
+    - name: Build Linux AppImage
+      if: ${{ matrix.platform == 'linux' }}
+      env:
+        LINUXDEPLOY_URL: https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage
+        APPIMAGETOOL_URL: https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+      run: |
+        sudo apt install -y wget
+        mkdir -p AppDir/usr/bin AppDir/usr/share/Z3R AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps dist
+        cc packaging/appimage/missing_assets_dialog.c $(sdl2-config --cflags --libs) -o z3r-missing-assets-dialog
+        install -Dm755 zelda3 AppDir/usr/bin/zelda3.real
+        install -Dm755 z3r-missing-assets-dialog AppDir/usr/bin/z3r-missing-assets-dialog
+        install -Dm644 zelda3.ini AppDir/usr/share/Z3R/zelda3.ini
+        install -Dm644 packaging/appimage/io.github.xander_haj.Z3R.linuxdeploy.desktop AppDir/io.github.xander_haj.Z3R.desktop
+        install -Dm644 packaging/flatpak/io.github.xander_haj.Z3R.svg AppDir/usr/share/icons/hicolor/scalable/apps/io.github.xander_haj.Z3R.svg
+        install -Dm644 packaging/flatpak/io.github.xander_haj.Z3R.svg AppDir/io.github.xander_haj.Z3R.svg
 
-          cat > AppDir/AppRun <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
+        wget -q "${LINUXDEPLOY_URL}" -O linuxdeploy-x86_64.AppImage
+        chmod +x linuxdeploy-x86_64.AppImage
+        ./linuxdeploy-x86_64.AppImage --appimage-extract
+        mv squashfs-root linuxdeploy-root
+        ./linuxdeploy-root/AppRun \
+          --appdir AppDir \
+          --executable AppDir/usr/bin/zelda3.real \
+          --executable AppDir/usr/bin/z3r-missing-assets-dialog \
+          --desktop-file AppDir/io.github.xander_haj.Z3R.desktop \
+          --icon-file AppDir/io.github.xander_haj.Z3R.svg
 
-          if [ -n "${APPIMAGE:-}" ]; then
-            cd "$(dirname "$APPIMAGE")"
-          fi
+        install -Dm755 packaging/appimage/AppRun AppDir/AppRun
+        ln -sf ../../AppRun AppDir/usr/bin/z3r
+        install -Dm644 packaging/appimage/io.github.xander_haj.Z3R.desktop AppDir/usr/share/applications/io.github.xander_haj.Z3R.desktop
+        install -Dm644 packaging/appimage/io.github.xander_haj.Z3R.desktop AppDir/io.github.xander_haj.Z3R.desktop
+        ln -sf usr/share/icons/hicolor/scalable/apps/io.github.xander_haj.Z3R.svg AppDir/io.github.xander_haj.Z3R.svg
 
-          export LD_LIBRARY_PATH="$APPDIR/usr/lib:$APPDIR/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
-          exec "$APPDIR/usr/bin/zelda3" "$@"
-          EOF
-          chmod +x AppDir/AppRun
-
-          cat > AppDir/usr/share/applications/zelda3.desktop <<'EOF'
-          [Desktop Entry]
-          Type=Application
-          Name=Zelda 3 Reborn
-          Exec=zelda3
-          Icon=zelda3
-          Categories=Game;
-          Terminal=false
-          EOF
-          cp AppDir/usr/share/applications/zelda3.desktop AppDir/zelda3.desktop
-
-          cat > AppDir/usr/share/icons/hicolor/scalable/apps/zelda3.svg <<'EOF'
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-            <rect width="128" height="128" rx="18" fill="#1f5f38"/>
-            <path fill="#f4d35e" d="M64 18 16 104h96L64 18Zm0 25 25 45H39l25-45Z"/>
-            <path fill="#f4d35e" d="M64 74 47 104h34L64 74Z"/>
-          </svg>
-          EOF
-          cp AppDir/usr/share/icons/hicolor/scalable/apps/zelda3.svg AppDir/zelda3.svg
-
-          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          chmod +x linuxdeploy-x86_64.AppImage
-          ./linuxdeploy-x86_64.AppImage --appimage-extract
-          ./squashfs-root/AppRun --appdir AppDir --executable AppDir/usr/bin/zelda3 --desktop-file AppDir/zelda3.desktop --icon-file AppDir/zelda3.svg --custom-apprun=AppDir/AppRun --output appimage
-
-          mv Zelda_3_Reborn-*.AppImage dist/Zelda-3-Reborn-${{ github.ref_name }}-linux-x64.AppImage
-          chmod +x dist/Zelda-3-Reborn-${{ github.ref_name }}-linux-x64.AppImage
-          cp zelda3.ini readme.md LICENSE.txt dist/
-          cd dist && zip -r ../zelda3-${{ github.ref_name }}-linux-x64.zip .
-      - name: Upload to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v3
-        with:
-          files: zelda3-${{ github.ref_name }}-linux-x64.zip
-
-  build-macos:
-    name: Build macOS
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Install dependencies
-        run: brew install sdl2 dylibbundler
-      - name: Build
-        run: make -j$(sysctl -n hw.ncpu) zelda3
-      - name: Package
-        run: |
-          APP_NAME="Zelda 3 Reborn.app"
-          mkdir -p "dist/$APP_NAME/Contents/MacOS" "dist/$APP_NAME/Contents/Resources" "dist/$APP_NAME/Contents/Frameworks"
-          cp zelda3 "dist/$APP_NAME/Contents/MacOS/zelda3-bin"
-
-          cat > "dist/$APP_NAME/Contents/MacOS/Zelda 3 Reborn" <<'EOF'
-          #!/bin/sh
-          APP_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
-          cd "$APP_DIR" || exit 1
-          exec "$APP_DIR/Zelda 3 Reborn.app/Contents/MacOS/zelda3-bin" "$@"
-          EOF
-          chmod +x "dist/$APP_NAME/Contents/MacOS/Zelda 3 Reborn"
-
-          cat > "dist/$APP_NAME/Contents/Info.plist" <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleExecutable</key>
-            <string>Zelda 3 Reborn</string>
-            <key>CFBundleIdentifier</key>
-            <string>com.github.xander-haj.z3r</string>
-            <key>CFBundleName</key>
-            <string>Zelda 3 Reborn</string>
-            <key>CFBundleDisplayName</key>
-            <string>Zelda 3 Reborn</string>
-            <key>CFBundlePackageType</key>
-            <string>APPL</string>
-            <key>CFBundleShortVersionString</key>
-            <string>1.0</string>
-            <key>CFBundleVersion</key>
-            <string>${{ github.run_number }}</string>
-            <key>LSMinimumSystemVersion</key>
-            <string>11.0</string>
-            <key>NSHighResolutionCapable</key>
-            <true/>
-          </dict>
-          </plist>
-          EOF
-
-          dylibbundler -od -b -x "dist/$APP_NAME/Contents/MacOS/zelda3-bin" -d "dist/$APP_NAME/Contents/Frameworks"
-          codesign --force --deep --sign - "dist/$APP_NAME"
-
-          cp zelda3.ini readme.md LICENSE.txt dist/
-          cd dist && zip -r "../zelda3-${{ github.ref_name }}-macos.zip" . && cd ..
-
-          mkdir -p dmg
-          cp -R "dist/$APP_NAME" dmg/
-          cp zelda3.ini readme.md LICENSE.txt dmg/
-          hdiutil create -volname "Zelda 3 Reborn ${{ github.ref_name }}" -srcfolder dmg -ov -format UDZO "zelda3-${{ github.ref_name }}-macos.dmg"
-      - name: Upload to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v3
-        with:
-          files: |
-            zelda3-${{ github.ref_name }}-macos.zip
-            zelda3-${{ github.ref_name }}-macos.dmg
+        wget -q "${APPIMAGETOOL_URL}" -O appimagetool-x86_64.AppImage
+        chmod +x appimagetool-x86_64.AppImage
+        ./appimagetool-x86_64.AppImage --appimage-extract
+        mv squashfs-root appimagetool-root
+        ARCH=x86_64 ./appimagetool-root/AppRun AppDir dist/Z3R-linux-x64.AppImage
+        chmod +x dist/Z3R-linux-x64.AppImage
+        tar -czf dist/Z3R-linux-x64.AppImage.tar.gz -C dist Z3R-linux-x64.AppImage
+    - name: Upload ${{ matrix.name }} artifact
+      uses: actions/upload-artifact@v6
+      with:
+        name: ${{ matrix.archive }}
+        path: dist/${{ matrix.archive }}
+        if-no-files-found: error
+    - name: Upload Linux AppImage artifact
+      if: ${{ matrix.platform == 'linux' }}
+      uses: actions/upload-artifact@v6
+      with:
+        name: Z3R-linux-x64.AppImage.tar.gz
+        path: dist/Z3R-linux-x64.AppImage.tar.gz
+        if-no-files-found: error
+    - name: Upload ${{ matrix.name }} release asset
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v3
+      env:
+        GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+      with:
+        token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        files: dist/${{ matrix.archive }}
+        generate_release_notes: true
+    - name: Upload Linux AppImage release asset
+      if: ${{ matrix.platform == 'linux' && startsWith(github.ref, 'refs/tags/') }}
+      uses: softprops/action-gh-release@v3
+      env:
+        GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+      with:
+        token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        files: |
+          dist/Z3R-linux-x64.AppImage
+          dist/Z3R-linux-x64.AppImage.tar.gz
+        generate_release_notes: true
 
   build-windows:
-    name: Build Windows
+    name: on Windows
     runs-on: windows-latest
-    defaults:
-      run:
-        shell: msys2 {0}
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v6
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            make
-            zip
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-SDL2
-            mingw-w64-x86_64-pkg-config
-      - name: Build
-        env:
-          CFLAGS: "-O2 -std=gnu17"
-        run: make -j$(nproc) zelda3
-      - name: Package
-        run: |
-          mkdir -p dist
-          cp zelda3.exe dist/
-          cp zelda3.ini readme.md LICENSE.txt dist/
-          cd dist && zip -r ../zelda3-${{ github.ref_name }}-windows-x64.zip .
-      - name: Upload to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v3
-        with:
-          files: zelda3-${{ github.ref_name }}-windows-x64.zip
+    - uses: actions/checkout@v6
+    - name: Set up MSBuild
+      uses: microsoft/setup-msbuild@v3
+    - name: Restore NuGet packages
+      run: nuget restore Zelda3.sln
+    - name: Build Windows exe
+      run: msbuild Zelda3.sln /m /p:Configuration=Release /p:Platform=x64
+    - name: Package Windows build
+      shell: pwsh
+      run: |
+        $packageDir = "dist/Z3R-windows-x64"
+        New-Item -ItemType Directory -Force $packageDir | Out-Null
+        Copy-Item "bin/x64-Release/zelda3.exe" $packageDir
+        Copy-Item -Path "README.md", "LICENSE.txt", "zelda3.ini" -Destination $packageDir
+
+        $sdlDll = Get-ChildItem -Path "bin", "packages" -Recurse -Filter "SDL2.dll" |
+          Where-Object { $_.FullName -match "x64" } |
+          Select-Object -First 1
+        if (-not $sdlDll) {
+          throw "Could not find SDL2.dll after NuGet restore/build."
+        }
+        Copy-Item $sdlDll.FullName $packageDir
+
+        Compress-Archive -Path "$packageDir/*" -DestinationPath "dist/Z3R-windows-x64.zip" -Force
+    - name: Upload Windows artifact
+      uses: actions/upload-artifact@v6
+      with:
+        name: Z3R-windows-x64.zip
+        path: dist/Z3R-windows-x64.zip
+        if-no-files-found: error
+    - name: Upload Windows release asset
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v3
+      env:
+        GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+      with:
+        token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        files: dist/Z3R-windows-x64.zip
+        generate_release_notes: true
+
+  build-flatpak:
+    name: Flatpak for Linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Build and upload Flatpak bundle
+      uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+      with:
+        bundle: Z3R-linux.flatpak
+        manifest-path: packaging/flatpak/io.github.xander_haj.Z3R.yml
+        branch: stable
+        cache-key: flatpak-builder-${{ github.sha }}
+        upload-artifact: true
+    - name: Upload Flatpak release asset
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v3
+      env:
+        GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+      with:
+        token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        files: Z3R-linux.flatpak
+        generate_release_notes: true
