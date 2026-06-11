@@ -273,6 +273,14 @@
       <Optimization Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Disabled</Optimization>
       <InlineFunctionExpansion Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">AnySuitable</InlineFunctionExpansion>
     </ClCompile>
+    <ClCompile Include="snes\ppu_grove_border_tile_data.c">
+      <Optimization Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Disabled</Optimization>
+      <InlineFunctionExpansion Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">AnySuitable</InlineFunctionExpansion>
+    </ClCompile>
+    <ClCompile Include="snes\ppu_grove_border_tiles.c">
+      <Optimization Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Disabled</Optimization>
+      <InlineFunctionExpansion Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">AnySuitable</InlineFunctionExpansion>
+    </ClCompile>
     <ClCompile Include="snes\snes.c">
       <Optimization Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Disabled</Optimization>
       <InlineFunctionExpansion Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Disabled</InlineFunctionExpansion>
@@ -471,6 +479,8 @@
     <ClInclude Include="snes\dsp_regs.h" />
     <ClInclude Include="snes\input.h" />
     <ClInclude Include="snes\ppu.h" />
+    <ClInclude Include="snes\ppu_grove_border_tile_data.h" />
+    <ClInclude Include="snes\ppu_grove_border_tiles.h" />
     <ClInclude Include="snes\saveload.h" />
     <ClInclude Include="snes\snes.h" />
     <ClInclude Include="snes\snes_regs.h" />

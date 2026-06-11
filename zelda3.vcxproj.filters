@@ -112,6 +112,12 @@
     <ClCompile Include="snes\ppu.c">
       <Filter>Snes</Filter>
     </ClCompile>
+    <ClCompile Include="snes\ppu_grove_border_tile_data.c">
+      <Filter>Snes</Filter>
+    </ClCompile>
+    <ClCompile Include="snes\ppu_grove_border_tiles.c">
+      <Filter>Snes</Filter>
+    </ClCompile>
     <ClCompile Include="snes\snes.c">
       <Filter>Snes</Filter>
     </ClCompile>
@@ -143,6 +149,12 @@
       <Filter>Snes</Filter>
     </ClInclude>
     <ClInclude Include="snes\ppu.h">
+      <Filter>Snes</Filter>
+    </ClInclude>
+    <ClInclude Include="snes\ppu_grove_border_tile_data.h">
+      <Filter>Snes</Filter>
+    </ClInclude>
+    <ClInclude Include="snes\ppu_grove_border_tiles.h">
       <Filter>Snes</Filter>
     </ClInclude>
     <ClInclude Include="snes\saveload.h">
