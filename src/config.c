@@ -22,6 +22,7 @@
 #include "config.h"
 #include "types.h"
 // Standard library — file I/O and string operations for INI parsing
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 // SDL — keyboard/gamepad input constants
@@ -224,6 +225,40 @@ int FindCmdForSdlKey(int code, int mod) {
 }
 
 /*
+ * ParseKeyBinding — Parses one keyboard binding string and registers it in
+ * the keyboard hash table. The optional Key:/Keyboard: prefix is accepted so
+ * [GamepadMap] can store keyboard buttons without confusing "Key:A" with the
+ * gamepad face button named "A".
+ */
+static bool ParseKeyBinding(const char *value, int cmd) {
+  const char *s = StringStartsWithNoCase(value, "Key:");
+  if (!s)
+    s = StringStartsWithNoCase(value, "Keyboard:");
+  if (!s)
+    s = value;
+
+  int key_with_mod = 0;
+  for (;;) {
+    if (StringStartsWithNoCase(s, "Shift+")) {
+      key_with_mod |= kKeyMod_Shift, s += 6;
+    } else if (StringStartsWithNoCase(s, "Ctrl+")) {
+      key_with_mod |= kKeyMod_Ctrl, s += 5;
+    } else if (StringStartsWithNoCase(s, "Alt+")) {
+      key_with_mod |= kKeyMod_Alt, s += 4;
+    } else {
+      break;
+    }
+  }
+
+  SDL_Keycode key = SDL_GetKeyFromName(s);
+  if (key == SDLK_UNKNOWN)
+    return false;
+  if (!KeyMapHash_Add(key_with_mod | REMAP_SDL_KEYCODE(key), cmd))
+    fprintf(stderr, "Duplicate key: '%s'\n", value);
+  return true;
+}
+
+/*
  * ParseKeyArray — Parses a comma-separated list of key binding strings
  * from the INI file and registers each one in the hash table.
  *
@@ -238,27 +273,8 @@ static void ParseKeyArray(char *value, int cmd, int size) {
   for (; i < size && (s = NextDelim(&value, ',')) != NULL; i++, cmd += (cmd != 0)) {
     if (*s == 0)
       continue;    // Empty slot — leave unbound
-    // Accumulate modifier prefixes by stripping recognized prefixes
-    int key_with_mod = 0;
-    for (;;) {
-      if (StringStartsWithNoCase(s, "Shift+")) {
-        key_with_mod |= kKeyMod_Shift, s += 6;
-      } else if (StringStartsWithNoCase(s, "Ctrl+")) {
-        key_with_mod |= kKeyMod_Ctrl, s += 5;
-      } else if (StringStartsWithNoCase(s, "Alt+")) {
-        key_with_mod |= kKeyMod_Alt, s += 4;
-      } else {
-        break;
-      }
-    }
-    // Use SDL's built-in key name parser for the base key
-    SDL_Keycode key = SDL_GetKeyFromName(s);
-    if (key == SDLK_UNKNOWN) {
+    if (!ParseKeyBinding(s, cmd))
       fprintf(stderr, "Unknown key: '%s'\n", s);
-      continue;
-    }
-    if (!KeyMapHash_Add(key_with_mod | REMAP_SDL_KEYCODE(key), cmd))
-      fprintf(stderr, "Duplicate key: '%s'\n", s);
   }
 }
 
@@ -363,7 +379,8 @@ static int ParseGamepadButtonName(const char **value) {
   // (Lb→L1 and Rb→R1 are aliases sharing the same ID)
   static const uint8 kGamepadKeyIds[] = {
     kGamepadBtn_Back, kGamepadBtn_Guide, kGamepadBtn_Start, kGamepadBtn_L3, kGamepadBtn_R3,
-    kGamepadBtn_L1, kGamepadBtn_R1, kGamepadBtn_DpadUp, kGamepadBtn_DpadDown, kGamepadBtn_DpadLeft, kGamepadBtn_DpadRight, kGamepadBtn_L2, kGamepadBtn_R2,
+    kGamepadBtn_L1, kGamepadBtn_R1, kGamepadBtn_DpadUp, kGamepadBtn_DpadDown,
+    kGamepadBtn_DpadLeft, kGamepadBtn_DpadRight, kGamepadBtn_L2, kGamepadBtn_R2,
     kGamepadBtn_L1, kGamepadBtn_R1, kGamepadBtn_A, kGamepadBtn_B, kGamepadBtn_X, kGamepadBtn_Y,
   };
   for (size_t i = 0; i != countof(kGamepadKeyNames); i++) {
@@ -385,18 +402,39 @@ static int ParseGamepadButtonName(const char **value) {
  * positions (not labels) determine the mapping.
  */
 static const uint8 kDefaultGamepadCmds[] = {
-  kGamepadBtn_DpadUp, kGamepadBtn_DpadDown, kGamepadBtn_DpadLeft, kGamepadBtn_DpadRight, kGamepadBtn_Back, kGamepadBtn_Start,
+  kGamepadBtn_DpadUp, kGamepadBtn_DpadDown, kGamepadBtn_DpadLeft, kGamepadBtn_DpadRight,
+  kGamepadBtn_Back, kGamepadBtn_Start,
   kGamepadBtn_B, kGamepadBtn_A, kGamepadBtn_Y, kGamepadBtn_X, kGamepadBtn_L1, kGamepadBtn_R1,
 };
 
 /*
- * ParseGamepadArray — Parses a comma-separated list of gamepad binding
- * strings from the INI file. Supports modifier combos using "+" syntax,
- * e.g., "L1+A" means "press A while holding L1".
- *
- * The parser reads button names left-to-right; all buttons before the
- * final one become modifiers (their bit set in the modifiers bitmask),
- * and the last button is the trigger that fires the command.
+ * ParseGamepadBinding — Parses one gamepad binding string. Supports modifier
+ * combos using "+" syntax, e.g., "L1+A" means "press A while holding L1".
+ */
+static bool ParseGamepadBinding(const char *s, int cmd) {
+  uint32 modifiers = 0;
+  const char *ss = s;
+  for (;;) {
+    int button = ParseGamepadButtonName(&ss);
+    if (button == kGamepadBtn_Invalid)
+      return false;
+    while (*ss == ' ' || *ss == '\t') ss++;
+    if (*ss == '+') {
+      ss++;
+      modifiers |= 1 << button;
+    } else if (*ss == 0) {
+      GamepadMap_Add(button, modifiers, cmd);
+      return true;
+    } else {
+      return false;
+    }
+  }
+}
+
+/*
+ * ParseGamepadArray — Parses a comma-separated list of [GamepadMap] bindings.
+ * Gamepad button names keep their existing priority, while Key:/Keyboard:
+ * prefixes and non-button SDL names are routed into the keyboard hash table.
  */
 static void ParseGamepadArray(char *value, int cmd, int size) {
   char *s;
@@ -404,27 +442,41 @@ static void ParseGamepadArray(char *value, int cmd, int size) {
   for (; i < size && (s = NextDelim(&value, ',')) != NULL; i++, cmd += (cmd != 0)) {
     if (*s == 0)
       continue;
-    uint32 modifiers = 0;
-    const char *ss = s;
-    for (;;) {
-      int button = ParseGamepadButtonName(&ss);
-      if (button == kGamepadBtn_Invalid) BAD: {
-        fprintf(stderr, "Unknown gamepad button: '%s'\n", s);
-        break;
-      }
-      while (*ss == ' ' || *ss == '\t') ss++;
-      if (*ss == '+') {
-        // This button is a modifier — set its bit and continue parsing
-        ss++;
-        modifiers |= 1 << button;
-      } else if (*ss == 0) {
-        // End of string — this button is the trigger, register the binding
-        GamepadMap_Add(button, modifiers, cmd);
-        break;
-      } else
-        goto BAD;
-    }
+    if (ParseGamepadBinding(s, cmd))
+      continue;
+    if (ParseKeyBinding(s, cmd))
+      continue;
+    fprintf(stderr, "Unknown gamepad button or key: '%s'\n", s);
   }
+}
+
+static bool ParseHudHalfTileCoord(char *value, int16 *result) {
+  while (*value == ' ' || *value == '\t')
+    value++;
+  char *end;
+  long whole = strtol(value, &end, 10);
+  long units = whole * 2;
+  if (end == value)
+    return false;
+  if (*end == '.') {
+    end++;
+    if (*end == '5') {
+      units += whole < 0 || value[0] == '-' ? -1 : 1;
+      end++;
+    } else if (*end == '0') {
+      end++;
+    } else {
+      return false;
+    }
+    while (*end == '0')
+      end++;
+  }
+  while (*end == ' ' || *end == '\t')
+    end++;
+  if (*end != 0 || units < INT16_MIN || units > INT16_MAX)
+    return false;
+  *result = (int16)units;
+  return true;
 }
 
 static bool ParseHudPosition(char *value, int16 *x, int16 *y) {
@@ -432,9 +484,7 @@ static bool ParseHudPosition(char *value, int16 *x, int16 *y) {
   char *sy = NextDelim(&value, ',');
   if (sx == NULL || sy == NULL || NextDelim(&value, ',') != NULL)
     return false;
-  *x = (int16)strtol(sx, (char**)NULL, 10);
-  *y = (int16)strtol(sy, (char**)NULL, 10);
-  return true;
+  return ParseHudHalfTileCoord(sx, x) && ParseHudHalfTileCoord(sy, y);
 }
 
 static bool ParseUint8Clamped(char *value, uint8 *result, int min, int max) {
@@ -792,34 +842,34 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
     } else if (StringEqualsNoCase(key, "HUDCounterBackdropPosition")) {
       if (!ParseHudPosition(value, &g_config.hud_rupees_bg_pos_x, &g_config.hud_rupees_bg_pos_y))
         return false;
-      g_config.hud_bombs_bg_pos_x = g_config.hud_rupees_bg_pos_x + 5;
+      g_config.hud_bombs_bg_pos_x = g_config.hud_rupees_bg_pos_x + 10;
       g_config.hud_bombs_bg_pos_y = g_config.hud_rupees_bg_pos_y;
-      g_config.hud_arrows_bg_pos_x = g_config.hud_rupees_bg_pos_x + 8;
+      g_config.hud_arrows_bg_pos_x = g_config.hud_rupees_bg_pos_x + 16;
       g_config.hud_arrows_bg_pos_y = g_config.hud_rupees_bg_pos_y;
-      g_config.hud_arrow_upgrade_bg_pos_x = g_config.hud_arrows_bg_pos_x - 1;
+      g_config.hud_arrow_upgrade_bg_pos_x = g_config.hud_arrows_bg_pos_x - 2;
       g_config.hud_arrow_upgrade_bg_pos_y = g_config.hud_arrows_bg_pos_y;
-      g_config.hud_keys_bg_pos_x = g_config.hud_rupees_bg_pos_x + 11;
+      g_config.hud_keys_bg_pos_x = g_config.hud_rupees_bg_pos_x + 22;
       g_config.hud_keys_bg_pos_y = g_config.hud_rupees_bg_pos_y;
       return true;
     } else if (StringEqualsNoCase(key, "HUDCountersPosition")) {
       if (!ParseHudPosition(value, &g_config.hud_rupees_bg_pos_x, &g_config.hud_rupees_bg_pos_y))
         return false;
-      g_config.hud_bombs_bg_pos_x = g_config.hud_rupees_bg_pos_x + 5;
+      g_config.hud_bombs_bg_pos_x = g_config.hud_rupees_bg_pos_x + 10;
       g_config.hud_bombs_bg_pos_y = g_config.hud_rupees_bg_pos_y;
-      g_config.hud_arrows_bg_pos_x = g_config.hud_rupees_bg_pos_x + 8;
+      g_config.hud_arrows_bg_pos_x = g_config.hud_rupees_bg_pos_x + 16;
       g_config.hud_arrows_bg_pos_y = g_config.hud_rupees_bg_pos_y;
-      g_config.hud_arrow_upgrade_bg_pos_x = g_config.hud_arrows_bg_pos_x - 1;
+      g_config.hud_arrow_upgrade_bg_pos_x = g_config.hud_arrows_bg_pos_x - 2;
       g_config.hud_arrow_upgrade_bg_pos_y = g_config.hud_arrows_bg_pos_y;
-      g_config.hud_keys_bg_pos_x = g_config.hud_rupees_bg_pos_x + 11;
+      g_config.hud_keys_bg_pos_x = g_config.hud_rupees_bg_pos_x + 22;
       g_config.hud_keys_bg_pos_y = g_config.hud_rupees_bg_pos_y;
-      g_config.hud_rupees_pos_x = g_config.hud_rupees_bg_pos_x + 1;
-      g_config.hud_rupees_pos_y = g_config.hud_rupees_bg_pos_y + 1;
+      g_config.hud_rupees_pos_x = g_config.hud_rupees_bg_pos_x + 2;
+      g_config.hud_rupees_pos_y = g_config.hud_rupees_bg_pos_y + 2;
       g_config.hud_bombs_pos_x = g_config.hud_bombs_bg_pos_x;
-      g_config.hud_bombs_pos_y = g_config.hud_bombs_bg_pos_y + 1;
+      g_config.hud_bombs_pos_y = g_config.hud_bombs_bg_pos_y + 2;
       g_config.hud_arrows_pos_x = g_config.hud_arrows_bg_pos_x;
-      g_config.hud_arrows_pos_y = g_config.hud_arrows_bg_pos_y + 1;
+      g_config.hud_arrows_pos_y = g_config.hud_arrows_bg_pos_y + 2;
       g_config.hud_keys_pos_x = g_config.hud_keys_bg_pos_x;
-      g_config.hud_keys_pos_y = g_config.hud_keys_bg_pos_y + 1;
+      g_config.hud_keys_pos_y = g_config.hud_keys_bg_pos_y + 2;
       return true;
     } else if (StringEqualsNoCase(key, "HUDHeartsFramePosition")) {
       return ParseHudPosition(value, &g_config.hud_hearts_frame_pos_x, &g_config.hud_hearts_frame_pos_y);
@@ -896,51 +946,53 @@ static bool ParseOneConfigFile(const char *filename, int depth) {
  * bindings not explicitly set in the config file.
  */
 void ParseConfigFile(const char *filename) {
+#define HUD_POS(x) ((x) * 2)
   g_config.msuvolume = 100;  // default msu volume, 100%
-  g_config.hud_magic_frame_pos_x = 0;
-  g_config.hud_magic_frame_pos_y = 0;
-  g_config.hud_magic_meter_pos_x = 0;
-  g_config.hud_magic_meter_pos_y = 0;
-  g_config.hud_item_box_pos_x = 5;
-  g_config.hud_item_box_pos_y = 0;
-  g_config.hud_item_icon_pos_x = 6;
-  g_config.hud_item_icon_pos_y = 1;
-  g_config.hud_item_x_box_pos_x = 9;
-  g_config.hud_item_x_box_pos_y = 0;
-  g_config.hud_item_x_icon_pos_x = 10;
-  g_config.hud_item_x_icon_pos_y = 1;
-  g_config.hud_item_l_box_pos_x = 13;
-  g_config.hud_item_l_box_pos_y = 0;
-  g_config.hud_item_l_icon_pos_x = 14;
-  g_config.hud_item_l_icon_pos_y = 1;
-  g_config.hud_item_r_box_pos_x = 17;
-  g_config.hud_item_r_box_pos_y = 0;
-  g_config.hud_item_r_icon_pos_x = 18;
-  g_config.hud_item_r_icon_pos_y = 1;
-  g_config.hud_rupees_bg_pos_x = 15;
-  g_config.hud_rupees_bg_pos_y = 0;
-  g_config.hud_rupees_pos_x = 16;
-  g_config.hud_rupees_pos_y = 1;
-  g_config.hud_bombs_bg_pos_x = 20;
-  g_config.hud_bombs_bg_pos_y = 0;
-  g_config.hud_bombs_pos_x = 20;
-  g_config.hud_bombs_pos_y = 1;
-  g_config.hud_arrows_bg_pos_x = 23;
-  g_config.hud_arrows_bg_pos_y = 0;
-  g_config.hud_arrow_upgrade_bg_pos_x = 22;
-  g_config.hud_arrow_upgrade_bg_pos_y = 0;
-  g_config.hud_arrows_pos_x = 23;
-  g_config.hud_arrows_pos_y = 1;
-  g_config.hud_keys_bg_pos_x = 26;
-  g_config.hud_keys_bg_pos_y = 0;
-  g_config.hud_keys_pos_x = 26;
-  g_config.hud_keys_pos_y = 1;
-  g_config.hud_floor_indicator_pos_x = 31;
-  g_config.hud_floor_indicator_pos_y = 3;
-  g_config.hud_hearts_frame_pos_x = 29;
-  g_config.hud_hearts_frame_pos_y = 0;
-  g_config.hud_hearts_pos_x = 29;
-  g_config.hud_hearts_pos_y = 1;
+  g_config.hud_magic_frame_pos_x = HUD_POS(0);
+  g_config.hud_magic_frame_pos_y = HUD_POS(0);
+  g_config.hud_magic_meter_pos_x = HUD_POS(0);
+  g_config.hud_magic_meter_pos_y = HUD_POS(0);
+  g_config.hud_item_box_pos_x = HUD_POS(5);
+  g_config.hud_item_box_pos_y = HUD_POS(0);
+  g_config.hud_item_icon_pos_x = HUD_POS(6);
+  g_config.hud_item_icon_pos_y = HUD_POS(1);
+  g_config.hud_item_x_box_pos_x = HUD_POS(9);
+  g_config.hud_item_x_box_pos_y = HUD_POS(0);
+  g_config.hud_item_x_icon_pos_x = HUD_POS(10);
+  g_config.hud_item_x_icon_pos_y = HUD_POS(1);
+  g_config.hud_item_l_box_pos_x = HUD_POS(13);
+  g_config.hud_item_l_box_pos_y = HUD_POS(0);
+  g_config.hud_item_l_icon_pos_x = HUD_POS(14);
+  g_config.hud_item_l_icon_pos_y = HUD_POS(1);
+  g_config.hud_item_r_box_pos_x = HUD_POS(17);
+  g_config.hud_item_r_box_pos_y = HUD_POS(0);
+  g_config.hud_item_r_icon_pos_x = HUD_POS(18);
+  g_config.hud_item_r_icon_pos_y = HUD_POS(1);
+  g_config.hud_rupees_bg_pos_x = HUD_POS(15);
+  g_config.hud_rupees_bg_pos_y = HUD_POS(0);
+  g_config.hud_rupees_pos_x = HUD_POS(16);
+  g_config.hud_rupees_pos_y = HUD_POS(1);
+  g_config.hud_bombs_bg_pos_x = HUD_POS(20);
+  g_config.hud_bombs_bg_pos_y = HUD_POS(0);
+  g_config.hud_bombs_pos_x = HUD_POS(20);
+  g_config.hud_bombs_pos_y = HUD_POS(1);
+  g_config.hud_arrows_bg_pos_x = HUD_POS(23);
+  g_config.hud_arrows_bg_pos_y = HUD_POS(0);
+  g_config.hud_arrow_upgrade_bg_pos_x = HUD_POS(22);
+  g_config.hud_arrow_upgrade_bg_pos_y = HUD_POS(0);
+  g_config.hud_arrows_pos_x = HUD_POS(23);
+  g_config.hud_arrows_pos_y = HUD_POS(1);
+  g_config.hud_keys_bg_pos_x = HUD_POS(26);
+  g_config.hud_keys_bg_pos_y = HUD_POS(0);
+  g_config.hud_keys_pos_x = HUD_POS(26);
+  g_config.hud_keys_pos_y = HUD_POS(1);
+  g_config.hud_floor_indicator_pos_x = HUD_POS(31);
+  g_config.hud_floor_indicator_pos_y = HUD_POS(3);
+  g_config.hud_hearts_frame_pos_x = HUD_POS(29);
+  g_config.hud_hearts_frame_pos_y = HUD_POS(0);
+  g_config.hud_hearts_pos_x = HUD_POS(29);
+  g_config.hud_hearts_pos_y = HUD_POS(1);
+#undef HUD_POS
 
   // Try user config first; fall back to default config
   if (filename != NULL || !ParseOneConfigFile("zelda3.user.ini", 0)) {
