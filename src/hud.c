@@ -146,6 +146,14 @@ static int Hud_GroupX(int default_x, int configured_x) {
   return Hud_RearrangeEnabled() ? configured_x : default_x;
 }
 
+/* Return true when two half-cell spans touch the same HUD overlay cells.
+ * This keeps overlap checks correct for both whole-tile and .5 HUD positions. */
+static bool Hud_HalfCellRangesOverlap(int first_start, int first_width, int second_start, int second_width) {
+  int first_end = first_start + first_width;
+  int second_end = second_start + second_width;
+  return first_start < second_end && second_start < first_end;
+}
+
 static bool Hud_ItemSwitchHudEnabled() {
   return (enhanced_features0 & (kFeatures0_SwitchLR | kFeatures0_SwitchLRLimit)) != 0;
 }
@@ -3484,8 +3492,8 @@ static void Hud_Update_Magic() {  // 8dfc09
  * count, and the bow icon's "with-arrows" state.
  *   - Each counter is rendered with Hud_IntToDecimal and stamped one digit per tile, in
  *     yellow (0x3400) when at maximum and white (0x2400) otherwise.
- *   - inv_offs shifts the rupee column over by one when the rupee count exceeds 999, so the
- *     four-digit display fits.
+ *   - inv_offs selects the legacy three-digit backdrop offset; when it is zero, the rupee
+ *     count is four digits and grows one tile left.
  *   - Switching link_item_bow between values 1↔2 and 3↔4 toggles the icon between empty- and
  *     filled-quiver graphics whenever the arrow count crosses zero.
  *   - link_num_keys == 0xff renders blank, used outside of dungeons. */
@@ -3525,8 +3533,18 @@ static void Hud_Update_Inventory() {  // 8dfc09
   int counters_x = 8;
   int counters_y = 0;
   if (Hud_RearrangeEnabled()) {
-    Hud_DrawTopHudBlock(g_config.hud_rupees_bg_pos_x, Hud_ClampHudBlockY(g_config.hud_rupees_bg_pos_y, 2),
-                        kHudRupeeBg, 5, 2, 5);
+    int rupee_bg_x = g_config.hud_rupees_bg_pos_x;
+    int rupee_bg_y = Hud_ClampHudBlockY(g_config.hud_rupees_bg_pos_y, 2);
+    int rupee_digit_x = g_config.hud_rupees_pos_x - (inv_offs == 0 ? Hud_TileOffset(1) : 0);
+    int rupee_digit_y = Hud_ClampHudBlockY(g_config.hud_rupees_pos_y, 1);
+    int rupee_icon_x = rupee_bg_x + Hud_TileOffset(2);
+    // Four-digit rupees grow one tile left; move same-row icons left so the thousands tile cannot cover them.
+    if (inv_offs == 0 &&
+        Hud_HalfCellRangesOverlap(rupee_icon_x, kHudHalfTile, rupee_digit_x, kHudHalfTile) &&
+        Hud_HalfCellRangesOverlap(rupee_bg_y, kHudHalfTile, rupee_digit_y, kHudHalfTile)) {
+      rupee_bg_x -= Hud_TileOffset(1);
+    }
+    Hud_DrawTopHudBlock(rupee_bg_x, rupee_bg_y, kHudRupeeBg, 5, 2, 5);
     Hud_DrawTopHudBlock(g_config.hud_bombs_bg_pos_x, Hud_ClampHudBlockY(g_config.hud_bombs_bg_pos_y, 2),
                         kHudBombBg, 2, 2, 2);
     Hud_DrawTopHudBlock(g_config.hud_arrows_bg_pos_x, Hud_ClampHudBlockY(g_config.hud_arrows_bg_pos_y, 2),
