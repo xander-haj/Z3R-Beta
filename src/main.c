@@ -4,7 +4,7 @@
  * SDL2-based platform entry point and host shell for the zelda3 reimplementation.
  *
  * Responsibilities of this file:
- *   - Process startup: parse the command line, locate and load zelda3.ini,
+ *   - Process startup: parse the command line, locate or recreate zelda3.ini,
  *     load assets (zelda3_assets.dat or BPS-patched ROM), and bring up the
  *     core game runtime via ZeldaInitialize() in zelda_rtl.c.
  *   - Window/renderer bring-up: open the SDL window, choose between the SDL
@@ -57,6 +57,7 @@
 #include "zelda_cpu_infra.h"
 
 #include "config.h"
+#include "default_config.h"
 #include "features.h"
 #include "hud.h"
 #include "assets.h"
@@ -589,8 +590,8 @@ void OpenGLRenderer_Create(struct RendererFuncs *funcs, bool use_opengl_es);
  *
  * High-level startup sequence:
  *   1. Parse args - optional `--config <file>` overrides the default
- *      INI search; otherwise SwitchDirectory walks up the cwd looking
- *      for zelda3.ini so the binary can be launched from any subfolder.
+ *      runtime-directory search; otherwise SwitchDirectory walks up the cwd
+ *      looking for zelda3.ini or zelda3_assets.dat.
  *   2. Load configuration, assets, and the optional ZSPR Link sprite.
  *   3. Initialize the engine (ZeldaInitialize) and pick the runtime
  *      PPU geometry / render flags from the config.
@@ -607,7 +608,7 @@ int main(int argc, char** argv) {
   const char *config_file = NULL;
   /* `--config <path>` lets the user point at an arbitrary INI file
    * (useful for shipping multiple presets). When absent, fall back to
-   * walking the cwd to find a co-located zelda3.ini. */
+   * walking the cwd to find the runtime directory. */
   if (argc >= 2 && strcmp(argv[0], "--config") == 0) {
     config_file = argv[1];
     argc -= 2, argv += 2;
@@ -1563,37 +1564,119 @@ static void LoadAssets() {
   }
 }
 
-// Go some steps up and find zelda3.ini
-/* SwitchDirectory: search the current working directory and up to two
- * parent directories for zelda3.ini, and chdir into the one that
- * contains it. This lets the binary be launched from a deep build
- * subdirectory while still finding the assets in the project root.
+/* RuntimeFileExists: checks whether a startup file can be opened for reading.
+ *
+ * Parameters:
+ *   filename - path to test, either relative to the current runtime directory
+ *              or absolute while SwitchDirectory is probing parent folders.
+ *
+ * Returns true when the file opens successfully, false otherwise. The helper
+ * uses fopen instead of platform-specific stat calls so it works in all builds.
+ */
+static bool RuntimeFileExists(const char *filename) {
+  FILE *f = fopen(filename, "rb");
+  if (!f)
+    return false;
+  fclose(f);
+  return true;
+}
+
+/* RuntimePathExists: appends a runtime filename to a candidate directory path
+ * in-place, tests it, and restores the original directory string.
+ *
+ * Parameters:
+ *   buf      - mutable absolute directory path with spare space at the end.
+ *   buf_size - total capacity of buf, used to avoid writing past the buffer.
+ *   pos      - index where the directory string currently ends.
+ *   filename - runtime file to append and test.
+ *
+ * Returns true if the candidate file exists and is readable.
+ */
+static bool RuntimePathExists(char *buf, size_t buf_size, size_t pos, const char *filename) {
+  size_t filename_len = strlen(filename);
+  if (pos + 1 + filename_len + 1 > buf_size)
+    return false;
+  buf[pos] = '/';
+  memcpy(buf + pos + 1, filename, filename_len + 1);
+  bool exists = RuntimeFileExists(buf);
+  buf[pos] = 0;
+  return exists;
+}
+
+/* EnterRuntimeDirectory: changes into a discovered runtime directory.
+ *
+ * Parameters:
+ *   buf            - absolute directory path to enter.
+ *   step           - search depth where 0 means buf is already the cwd.
+ *   found_filename - file that proved this directory is the runtime root.
+ *
+ * Returns true when the process is now in the runtime directory, false when
+ * chdir failed and callers must not create config files relative to cwd.
+ */
+static bool EnterRuntimeDirectory(char *buf, int step, const char *found_filename) {
+  if (step == 0)
+    return true;
+  printf("Found %s in %s\n", found_filename, buf);
+  if (chdir(buf) == 0)
+    return true;
+  fprintf(stderr, "Warning: Unable to enter runtime directory %s\n", buf);
+  return false;
+}
+
+/* EnsureConfigFileBesideAssets: creates zelda3.ini in the runtime directory
+ * only when zelda3_assets.dat exists there and zelda3.ini does not.
+ *
+ * Parameters: none; uses the current working directory selected by
+ * SwitchDirectory.
+ *
+ * Returns nothing. Creation failures are warnings because read-only package
+ * layouts may still be handled by launch wrappers that pass --config.
+ */
+static void EnsureConfigFileBesideAssets() {
+  if (RuntimeFileExists("zelda3.ini") || !RuntimeFileExists("zelda3_assets.dat"))
+    return;
+
+  FILE *f = fopen("zelda3.ini", "wb");
+  if (!f) {
+    fprintf(stderr, "Warning: Unable to create zelda3.ini beside zelda3_assets.dat\n");
+    return;
+  }
+
+  size_t config_size = sizeof(kDefaultZelda3Ini) - 1;
+  bool wrote_config = fwrite(kDefaultZelda3Ini, 1, config_size, f) == config_size;
+  if (fclose(f) != 0)
+    wrote_config = false;
+  if (wrote_config)
+    fprintf(stderr, "Created default zelda3.ini beside zelda3_assets.dat\n");
+  else
+    fprintf(stderr, "Warning: Unable to finish writing zelda3.ini\n");
+}
+
+/* SwitchDirectory: search the current working directory and up to two parent
+ * directories for the game's runtime root, then chdir into it. zelda3.ini is
+ * still the strongest signal; zelda3_assets.dat is accepted as a fallback so
+ * unpacked local builds can recreate zelda3.ini when the config file is lost.
  *
  * The walk is bounded to 3 steps so a misconfigured launcher cannot
  * accidentally walk up to the filesystem root.
  */
 static void SwitchDirectory() {
   char buf[4096];
-  /* Reserve 32 bytes at the end for the "/zelda3.ini" suffix we will
-   * append below. */
+  /* Reserve 32 bytes at the end for the longest runtime filename this search
+   * appends, currently "/zelda3_assets.dat". */
   if (!getcwd(buf, sizeof(buf) - 32))
     return;
   size_t pos = strlen(buf);
 
   for (int step = 0; pos != 0 && step < 3; step++) {
-    memcpy(buf + pos, "/zelda3.ini", 12);
-    FILE *f = fopen(buf, "rb");
-    if (f) {
-      fclose(f);
-      buf[pos] = 0;
-      /* Only chdir if we actually moved up at least one level. step==0
-       * means the file is already in the current directory, no chdir
-       * needed. */
-      if (step != 0) {
-        printf("Found zelda3.ini in %s\n", buf);
-        int err = chdir(buf);
-        (void)err;
-      }
+    if (RuntimePathExists(buf, sizeof(buf), pos, "zelda3.ini")) {
+      if (EnterRuntimeDirectory(buf, step, "zelda3.ini"))
+        EnsureConfigFileBesideAssets();
+      return;
+    }
+    if (RuntimePathExists(buf, sizeof(buf), pos, "zelda3_assets.dat")) {
+      if (EnterRuntimeDirectory(buf, step, "zelda3_assets.dat"))
+        EnsureConfigFileBesideAssets();
       return;
     }
     /* Walk one directory up by trimming the last path component. The
@@ -1601,6 +1684,7 @@ static void SwitchDirectory() {
     pos--;
     while (pos != 0 && buf[pos] != '/' && buf[pos] != '\\')
       pos--;
+    buf[pos] = 0;
   }
 }
 
