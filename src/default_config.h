@@ -2,19 +2,20 @@
  * default_config.h - Embedded fallback zelda3.ini template.
  *
  * This header gives the executable enough information to recreate zelda3.ini
- * when a local build or unpacked release contains zelda3_assets.dat but lost
- * the human-editable config file. The shipped zelda3.ini remains the primary
- * template for packaged builds; this copy is only a last-resort bootstrap.
+ * when no shipped or explicit default config is available. The shipped
+ * zelda3.ini remains the primary template for packaged builds; this copy is
+ * only a last-resort bootstrap.
  */
 #ifndef ZELDA3_DEFAULT_CONFIG_H_
 #define ZELDA3_DEFAULT_CONFIG_H_
 
-/* Default INI text written beside zelda3_assets.dat when zelda3.ini is absent.
- * Values mirror the repository's zelda3.ini defaults so a recreated file starts
- * the game with the same audio, video, feature, keyboard, and gamepad behavior.
+/* Default INI text written to the selected user/config path when zelda3.ini is
+ * absent. Values mirror the repository's zelda3.ini defaults so a recreated
+ * file starts the game with the same audio, video, feature, keyboard, and
+ * gamepad behavior.
  */
 static const char kDefaultZelda3Ini[] =
-  "# zelda3.ini was recreated because zelda3_assets.dat was present but this file was missing.\n"
+  "# zelda3.ini was recreated because no default config file was present.\n"
   "# Edit this file to change local graphics, sound, feature, keyboard, and gamepad settings.\n"
   "\n"
   "[General]\n"

@@ -4,9 +4,9 @@
  * SDL2-based platform entry point and host shell for the zelda3 reimplementation.
  *
  * Responsibilities of this file:
- *   - Process startup: parse the command line, locate or recreate zelda3.ini,
- *     load assets (zelda3_assets.dat or BPS-patched ROM), and bring up the
- *     core game runtime via ZeldaInitialize() in zelda_rtl.c.
+ *   - Process startup: parse the command line, resolve config/save paths, load
+ *     assets (zelda3_assets.dat or BPS-patched ROM), and bring up the core game
+ *     runtime via ZeldaInitialize() in zelda_rtl.c.
  *   - Window/renderer bring-up: open the SDL window, choose between the SDL
  *     renderer (kSdlRendererFuncs in this file) and the OpenGL renderer
  *     (provided by opengl.c via OpenGLRenderer_Create), and route every PPU
@@ -41,11 +41,6 @@
 #include <SDL.h>
 #ifdef _WIN32
 #include "platform/win32/volume_control.h"
-#include <direct.h>
-#else
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
 #endif
 
 #include "snes/ppu.h"
@@ -57,7 +52,7 @@
 #include "zelda_cpu_infra.h"
 
 #include "config.h"
-#include "default_config.h"
+#include "runtime_paths.h"
 #include "features.h"
 #include "hud.h"
 #include "assets.h"
@@ -87,7 +82,6 @@ static void OpenOneGamepad(int i);
 static bool CaptureNewSettingsKey(SDL_Keycode key, SDL_Keymod mod);
 static void HandleVolumeAdjustment(int volume_adjustment);
 static void LoadAssets();
-static void SwitchDirectory();
 
 /* Default values used when the parsed config (zelda3.ini) leaves a setting
  * unspecified or out of range. kMaxWindowScale caps integer window
@@ -589,9 +583,8 @@ void OpenGLRenderer_Create(struct RendererFuncs *funcs, bool use_opengl_es);
 /* main: process entry point.
  *
  * High-level startup sequence:
- *   1. Parse args - optional `--config <file>` overrides the default
- *      runtime-directory search; otherwise SwitchDirectory walks up the cwd
- *      looking for zelda3.ini or zelda3_assets.dat.
+ *   1. Parse args, resolve runtime/config/save paths, then load the INI
+ *      configuration.
  *   2. Load configuration, assets, and the optional ZSPR Link sprite.
  *   3. Initialize the engine (ZeldaInitialize) and pick the runtime
  *      PPU geometry / render flags from the config.
@@ -606,16 +599,15 @@ void OpenGLRenderer_Create(struct RendererFuncs *funcs, bool use_opengl_es);
 int main(int argc, char** argv) {
   argc--, argv++;
   const char *config_file = NULL;
-  /* `--config <path>` lets the user point at an arbitrary INI file
-   * (useful for shipping multiple presets). When absent, fall back to
-   * walking the cwd to find the runtime directory. */
+  /* `--config <path>` lets wrappers point at a managed config directory.
+   * RuntimePaths_Init then resolves config/save paths and the shared asset path
+   * before the config parser or asset loader touches disk. */
   if (argc >= 2 && strcmp(argv[0], "--config") == 0) {
     config_file = argv[1];
     argc -= 2, argv += 2;
-  } else {
-    SwitchDirectory();
   }
-  ParseConfigFile(config_file);
+  RuntimePaths_Init(config_file);
+  ParseConfigFile(NULL);
   LoadAssets();
   LoadLinkGraphics();
 
@@ -753,13 +745,9 @@ int main(int argc, char** argv) {
   if (argc >= 1 && !g_run_without_emu)
     LoadRom(argv[0]);
 
-  /* Make sure the saves directory exists before SaveLoadSlot tries to
-   * write into it. The Windows CRT spelling differs from POSIX mkdir. */
-#if defined(_WIN32)
-  _mkdir("saves");
-#else
-  mkdir("saves", 0755);
-#endif
+  /* Make sure the resolved save directory exists before SaveLoadSlot tries to
+   * write into it. Runtime path resolution keeps Linux /opt installs read-only. */
+  RuntimePaths_EnsureSaveDir();
 
   ZeldaReadSram();
 
@@ -1509,17 +1497,17 @@ uint32 g_asset_sizes[kNumberOfAssets];
  */
 static void LoadAssets() {
   size_t length = 0;
-  uint8 *data = ReadWholeFile("zelda3_assets.dat", &length);
+  uint8 *data = ReadWholeFile(RuntimePath_AssetsFile(), &length);
   if (!data) {
     /* Fall-back path: synthesize the asset blob from a BPS patch
      * applied to the user's original SNES ROM. Both files must be
      * present and the patch must apply cleanly. */
     size_t bps_length, bps_src_length;
     uint8 *bps, *bps_src;
-    bps = ReadWholeFile("zelda3_assets.bps", &bps_length);
+    bps = ReadWholeFile(RuntimePath_BpsFile(), &bps_length);
     if (!bps)
       Die("Failed to read zelda3_assets.dat. Please see the README for information about how you get this file.");
-    bps_src = ReadWholeFile("zelda3.sfc", &bps_src_length);
+    bps_src = ReadWholeFile(RuntimePath_BpsSourceRomFile(), &bps_src_length);
     if (!bps_src)
       Die("Missing file: zelda3.sfc");
     data = ApplyBps(bps_src, bps_src_length, bps, bps_length, &length);
@@ -1561,130 +1549,6 @@ static void LoadAssets() {
     kPalette_DungBgMain[0x484] = 0x70;
     kPalette_DungBgMain[0x485] = 0x95;
     kPalette_DungBgMain[0x486] = 0x57;
-  }
-}
-
-/* RuntimeFileExists: checks whether a startup file can be opened for reading.
- *
- * Parameters:
- *   filename - path to test, either relative to the current runtime directory
- *              or absolute while SwitchDirectory is probing parent folders.
- *
- * Returns true when the file opens successfully, false otherwise. The helper
- * uses fopen instead of platform-specific stat calls so it works in all builds.
- */
-static bool RuntimeFileExists(const char *filename) {
-  FILE *f = fopen(filename, "rb");
-  if (!f)
-    return false;
-  fclose(f);
-  return true;
-}
-
-/* RuntimePathExists: appends a runtime filename to a candidate directory path
- * in-place, tests it, and restores the original directory string.
- *
- * Parameters:
- *   buf      - mutable absolute directory path with spare space at the end.
- *   buf_size - total capacity of buf, used to avoid writing past the buffer.
- *   pos      - index where the directory string currently ends.
- *   filename - runtime file to append and test.
- *
- * Returns true if the candidate file exists and is readable.
- */
-static bool RuntimePathExists(char *buf, size_t buf_size, size_t pos, const char *filename) {
-  size_t filename_len = strlen(filename);
-  if (pos + 1 + filename_len + 1 > buf_size)
-    return false;
-  buf[pos] = '/';
-  memcpy(buf + pos + 1, filename, filename_len + 1);
-  bool exists = RuntimeFileExists(buf);
-  buf[pos] = 0;
-  return exists;
-}
-
-/* EnterRuntimeDirectory: changes into a discovered runtime directory.
- *
- * Parameters:
- *   buf            - absolute directory path to enter.
- *   step           - search depth where 0 means buf is already the cwd.
- *   found_filename - file that proved this directory is the runtime root.
- *
- * Returns true when the process is now in the runtime directory, false when
- * chdir failed and callers must not create config files relative to cwd.
- */
-static bool EnterRuntimeDirectory(char *buf, int step, const char *found_filename) {
-  if (step == 0)
-    return true;
-  printf("Found %s in %s\n", found_filename, buf);
-  if (chdir(buf) == 0)
-    return true;
-  fprintf(stderr, "Warning: Unable to enter runtime directory %s\n", buf);
-  return false;
-}
-
-/* EnsureConfigFileBesideAssets: creates zelda3.ini in the runtime directory
- * only when zelda3_assets.dat exists there and zelda3.ini does not.
- *
- * Parameters: none; uses the current working directory selected by
- * SwitchDirectory.
- *
- * Returns nothing. Creation failures are warnings because read-only package
- * layouts may still be handled by launch wrappers that pass --config.
- */
-static void EnsureConfigFileBesideAssets() {
-  if (RuntimeFileExists("zelda3.ini") || !RuntimeFileExists("zelda3_assets.dat"))
-    return;
-
-  FILE *f = fopen("zelda3.ini", "wb");
-  if (!f) {
-    fprintf(stderr, "Warning: Unable to create zelda3.ini beside zelda3_assets.dat\n");
-    return;
-  }
-
-  size_t config_size = sizeof(kDefaultZelda3Ini) - 1;
-  bool wrote_config = fwrite(kDefaultZelda3Ini, 1, config_size, f) == config_size;
-  if (fclose(f) != 0)
-    wrote_config = false;
-  if (wrote_config)
-    fprintf(stderr, "Created default zelda3.ini beside zelda3_assets.dat\n");
-  else
-    fprintf(stderr, "Warning: Unable to finish writing zelda3.ini\n");
-}
-
-/* SwitchDirectory: search the current working directory and up to two parent
- * directories for the game's runtime root, then chdir into it. zelda3.ini is
- * still the strongest signal; zelda3_assets.dat is accepted as a fallback so
- * unpacked local builds can recreate zelda3.ini when the config file is lost.
- *
- * The walk is bounded to 3 steps so a misconfigured launcher cannot
- * accidentally walk up to the filesystem root.
- */
-static void SwitchDirectory() {
-  char buf[4096];
-  /* Reserve 32 bytes at the end for the longest runtime filename this search
-   * appends, currently "/zelda3_assets.dat". */
-  if (!getcwd(buf, sizeof(buf) - 32))
-    return;
-  size_t pos = strlen(buf);
-
-  for (int step = 0; pos != 0 && step < 3; step++) {
-    if (RuntimePathExists(buf, sizeof(buf), pos, "zelda3.ini")) {
-      if (EnterRuntimeDirectory(buf, step, "zelda3.ini"))
-        EnsureConfigFileBesideAssets();
-      return;
-    }
-    if (RuntimePathExists(buf, sizeof(buf), pos, "zelda3_assets.dat")) {
-      if (EnterRuntimeDirectory(buf, step, "zelda3_assets.dat"))
-        EnsureConfigFileBesideAssets();
-      return;
-    }
-    /* Walk one directory up by trimming the last path component. The
-     * inner while peels characters off until it hits a path separator. */
-    pos--;
-    while (pos != 0 && buf[pos] != '/' && buf[pos] != '\\')
-      pos--;
-    buf[pos] = 0;
   }
 }
 

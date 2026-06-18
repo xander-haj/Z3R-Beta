@@ -37,6 +37,7 @@
 #include "messaging.h"
 #include "config.h"
 #include "features.h"
+#include "runtime_paths.h"
 #include "util.h"
 
 #include <stdio.h>
@@ -1386,12 +1387,6 @@ static char g_new_settings_keymap_values[kNewSettingsInputBindingCount][kNewSett
 static char g_new_settings_gamepad_values[kNewSettingsInputBindingCount][kNewSettingsInputValueLen];
 static char g_new_settings_cheat_values[kNewSettingsCheatBindingCount][kNewSettingsInputValueLen];
 
-/* The in-game settings menu treats zelda3.ini as the shipped template and
- * zelda3.user.ini as the user's durable override file. */
-static const char kNewSettingsDefaultIniFile[] = "zelda3.ini";
-static const char kNewSettingsUserIniFile[] = "zelda3.user.ini";
-static const char kNewSettingsUserIniSeed[] = "!include zelda3.ini\n\n";
-
 static const char *const kNewSettingsInputLabels[kNewSettingsInputBindingCount] = {
   "UP", "DOWN", "LEFT", "RIGHT", "SELECT", "START", "A", "B", "X", "Y", "L", "R", "SETTINGS",
 };
@@ -1592,11 +1587,11 @@ static bool NewSettings_ReadIniValueFromFile(const char *filename, const char *s
 }
 
 /* NewSettings_ReadIniValue: resolves editable menu values from user overrides
- * first, then from the shipped default file when the user file has no value. */
+ * first, then from the selected default file when the user file has no value. */
 static bool NewSettings_ReadIniValue(const char *section, const char *key, char *out, size_t out_size) {
-  if (NewSettings_ReadIniValueFromFile(kNewSettingsUserIniFile, section, key, out, out_size))
+  if (NewSettings_ReadIniValueFromFile(RuntimePath_UserConfigFile(), section, key, out, out_size))
     return true;
-  return NewSettings_ReadIniValueFromFile(kNewSettingsDefaultIniFile, section, key, out, out_size);
+  return NewSettings_ReadIniValueFromFile(RuntimePath_DefaultConfigFile(), section, key, out, out_size);
 }
 
 static void NewSettings_CopyBinding(char dst[kNewSettingsInputValueLen], const char *value) {
@@ -1633,41 +1628,41 @@ static void NewSettings_LoadInputBindings() {
   }
 }
 
-/* NewSettings_EnsureUserIniFile: creates zelda3.user.ini on first settings
- * save and seeds it with an include so future boots inherit zelda3.ini. */
+/* NewSettings_EnsureUserIniFile: creates the editable config file on first
+ * settings save. Linux /opt installs use an override file; other builds edit
+ * the normal zelda3.ini. */
 static bool NewSettings_EnsureUserIniFile() {
   size_t len = 0;
-  char *file = (char *)ReadWholeFile(kNewSettingsUserIniFile, &len);
+  const char *user_ini_file = RuntimePath_UserConfigFile();
+  char *file = (char *)ReadWholeFile(user_ini_file, &len);
   if (file) {
     free(file);
     return true;
   }
 
-  FILE *f = fopen(kNewSettingsUserIniFile, "wb");
+  FILE *f = fopen(user_ini_file, "wb");
   if (!f) {
-    fprintf(stderr, "Warning: Unable to create %s\n", kNewSettingsUserIniFile);
+    fprintf(stderr, "Warning: Unable to create %s\n", user_ini_file);
     return false;
   }
 
-  size_t seed_size = sizeof(kNewSettingsUserIniSeed) - 1;
-  bool wrote_seed = fwrite(kNewSettingsUserIniSeed, 1, seed_size, f) == seed_size;
-  if (fclose(f) != 0)
-    wrote_seed = false;
-  if (!wrote_seed)
-    fprintf(stderr, "Warning: Unable to write %s\n", kNewSettingsUserIniFile);
-  return wrote_seed;
+  bool created = fclose(f) == 0;
+  if (!created)
+    fprintf(stderr, "Warning: Unable to write %s\n", user_ini_file);
+  return created;
 }
 
-/* NewSettings_WriteIniValue: writes changed settings only to zelda3.user.ini,
- * leaving the shipped zelda3.ini safe to replace during updates. */
+/* NewSettings_WriteIniValue: writes changed settings to the resolved editable
+ * config file. Linux /opt installs keep the shipped default config untouched. */
 static void NewSettings_WriteIniValue(const char *section, const char *key, const char *value) {
   if (!NewSettings_EnsureUserIniFile())
     return;
 
   size_t len = 0;
-  char *file = (char *)ReadWholeFile(kNewSettingsUserIniFile, &len);
+  const char *user_ini_file = RuntimePath_UserConfigFile();
+  char *file = (char *)ReadWholeFile(user_ini_file, &len);
   if (!file) {
-    fprintf(stderr, "Warning: Unable to read %s\n", kNewSettingsUserIniFile);
+    fprintf(stderr, "Warning: Unable to read %s\n", user_ini_file);
     return;
   }
 
@@ -1675,12 +1670,12 @@ static void NewSettings_WriteIniValue(const char *section, const char *key, cons
   snprintf(section_header, sizeof(section_header), "[%s]", section);
   char *section_start = strstr(file, section_header);
   if (!section_start) {
-    FILE *f = fopen(kNewSettingsUserIniFile, "ab");
+    FILE *f = fopen(user_ini_file, "ab");
     if (f) {
       fprintf(f, "\n[%s]\n%s = %s\n", section, key, value);
       fclose(f);
     } else {
-      fprintf(stderr, "Warning: Unable to append %s\n", kNewSettingsUserIniFile);
+      fprintf(stderr, "Warning: Unable to append %s\n", user_ini_file);
     }
     free(file);
     return;
@@ -1732,12 +1727,12 @@ static void NewSettings_WriteIniValue(const char *section, const char *key, cons
     ByteArray_AppendData(&out, (uint8 *)section_end, file + len - section_end);
   }
 
-  FILE *f = fopen(kNewSettingsUserIniFile, "wb");
+  FILE *f = fopen(user_ini_file, "wb");
   if (f) {
     fwrite(out.data, 1, out.size, f);
     fclose(f);
   } else {
-    fprintf(stderr, "Warning: Unable to update %s\n", kNewSettingsUserIniFile);
+    fprintf(stderr, "Warning: Unable to update %s\n", user_ini_file);
   }
   ByteArray_Destroy(&out);
   free(file);
